@@ -1,151 +1,302 @@
 import streamlit as st
+import pulp
 import pandas as pd
-import math
-from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="American Steel Optimizer", layout="centered")
+st.title("🧮 American Steel Company - Optimización de Costos")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# =======================
+# DATOS POR DEFECTO
+# =======================
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Minas con tipo, costo y límites
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+with open("Manual_Usuario.pdf.pdf", "rb") as f:
+    st.download_button("📖 Abrir Manual de Usuario", f, file_name="Manual_Usuario.pdf.pdf")
+minas = {
+    "Butte": {"tipo": "A", "compra": 130, "envio": {"Pittsburg": 10, "Youngstown": 13}, "limite": 1000},
+    "Cheyenne": {"tipo": "B", "compra": 110, "envio": {"Pittsburg": 14, "Youngstown": 17}, "limite": 2000}
+}
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Plantas con capacidad y costos
+plantas = {
+    "Pittsburg": {"capacidad": 700, "proceso": {"alto": 32, "bajo": 27}},
+    "Youngstown": {"capacidad": 1500, "proceso": {"alto": 39, "bajo": 32}}
+}
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# Mezclas para tipos de acero
+mezclas = {
+    "alto": {"A": 1, "B": 2},
+    "bajo": {"A": 1, "B": 3}
+}
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+# Demanda y costos de envío del producto terminado
+paises = {
+    "Japón":    {"alto": 400, "bajo": 200, "envio": {"Pittsburg": {"alto": 110, "bajo": 100}, "Youngstown": {"alto": 115, "bajo": 110}}},
+    "Corea":    {"alto": 200, "bajo": 100, "envio": {"Pittsburg": {"alto": 140, "bajo": 130}, "Youngstown": {"alto": 150, "bajo": 145}}},
+    "Taiwán":   {"alto": 200, "bajo": 100, "envio": {"Pittsburg": {"alto": 130, "bajo": 125}, "Youngstown": {"alto": 135, "bajo": 127}}},
+    "México":   {"alto": 150, "bajo": 50,  "envio": {"Pittsburg": {"alto": 80, "bajo": 80},   "Youngstown": {"alto": 90, "bajo": 85}}}
+}
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# =======================
+# ENTRADAS DINÁMICAS
+# =======================
 
-    return gdp_df
+def init_session_state():
+    if "minas" not in st.session_state:
+        st.session_state["minas"] = {
+            "Butte": {"tipo": "A", "compra": 130, "envio": {"Pittsburg": 10, "Youngstown": 13}, "limite": 1000},
+            "Cheyenne": {"tipo": "B", "compra": 110, "envio": {"Pittsburg": 14, "Youngstown": 17}, "limite": 2000}
+        }
+    if "plantas" not in st.session_state:
+        st.session_state["plantas"] = {
+            "Pittsburg": {"capacidad": 700, "proceso": {"alto": 32, "bajo": 27}},
+            "Youngstown": {"capacidad": 1500, "proceso": {"alto": 39, "bajo": 32}}
+        }
+    if "mezclas" not in st.session_state:
+        st.session_state["mezclas"] = {
+            "alto": {"A": 1, "B": 2},
+            "bajo": {"A": 1, "B": 3}
+        }
+    if "paises" not in st.session_state:
+        st.session_state["paises"] = {
+            "Japón":    {"alto": 400, "bajo": 200, "envio": {"Pittsburg": {"alto": 110, "bajo": 100}, "Youngstown": {"alto": 115, "bajo": 110}}},
+            "Corea":    {"alto": 200, "bajo": 100, "envio": {"Pittsburg": {"alto": 140, "bajo": 130}, "Youngstown": {"alto": 150, "bajo": 145}}},
+            "Taiwán":   {"alto": 200, "bajo": 100, "envio": {"Pittsburg": {"alto": 130, "bajo": 125}, "Youngstown": {"alto": 135, "bajo": 127}}},
+            "México":   {"alto": 150, "bajo": 50,  "envio": {"Pittsburg": {"alto": 80, "bajo": 80},   "Youngstown": {"alto": 90, "bajo": 85}}}
+        }
 
-gdp_df = get_gdp_data()
+init_session_state()
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Formulario para editar minas
+def minas_form():
+    st.subheader("Minas")
+    minas = st.session_state["minas"]
+    to_delete = []
+    for nombre, datos in minas.items():
+        with st.expander(f"{nombre}"):
+            new_nombre = st.text_input(f"Nombre mina", value=nombre, key=f"minaname_{nombre}")
+            tipo = st.selectbox(f"Tipo", ["A", "B"], index=["A", "B"].index(datos["tipo"]), key=f"minatipo_{nombre}")
+            compra = st.number_input(f"Costo compra", value=datos["compra"], key=f"minacompra_{nombre}")
+            limite = st.number_input(f"Límite", value=datos["limite"], key=f"minalimite_{nombre}")
+            envio = {}
+            for planta in st.session_state["plantas"]:
+                envio[planta] = st.number_input(f"Envío a {planta}", value=datos["envio"].get(planta, 0), key=f"minaenvio_{nombre}_{planta}")
+            if st.button(f"Eliminar mina {nombre}"):
+                to_delete.append(nombre)
+            # Actualizar datos
+            minas[new_nombre] = {"tipo": tipo, "compra": compra, "envio": envio, "limite": limite}
+            if new_nombre != nombre:
+                to_delete.append(nombre)
+    for nombre in to_delete:
+        if nombre in minas:
+            del minas[nombre]
+    if st.button("Agregar mina"):
+        minas[f"Mina{len(minas)+1}"] = {"tipo": "A", "compra": 0, "envio": {pl: 0 for pl in st.session_state["plantas"]}, "limite": 0}
+    st.session_state["minas"] = minas
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# Formulario para editar plantas
+def plantas_form():
+    st.subheader("Plantas")
+    plantas = st.session_state["plantas"]
+    to_delete = []
+    for nombre, datos in plantas.items():
+        with st.expander(f"{nombre}"):
+            new_nombre = st.text_input(f"Nombre planta", value=nombre, key=f"plantaname_{nombre}")
+            capacidad = st.number_input(f"Capacidad", value=datos["capacidad"], key=f"plantacap_{nombre}")
+            proceso = {}
+            for t in ["alto", "bajo"]:
+                proceso[t] = st.number_input(f"Costo proceso {t}", value=datos["proceso"].get(t, 0), key=f"plantaproc_{nombre}_{t}")
+            if st.button(f"Eliminar planta {nombre}"):
+                to_delete.append(nombre)
+            plantas[new_nombre] = {"capacidad": capacidad, "proceso": proceso}
+            if new_nombre != nombre:
+                to_delete.append(nombre)
+    for nombre in to_delete:
+        if nombre in plantas:
+            del plantas[nombre]
+    if st.button("Agregar planta"):
+        plantas[f"Planta{len(plantas)+1}"] = {"capacidad": 0, "proceso": {"alto": 0, "bajo": 0}}
+    st.session_state["plantas"] = plantas
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+# Formulario para editar mezclas
+def mezclas_form():
+    st.subheader("Mezclas de acero")
+    mezclas = st.session_state["mezclas"]
+    for t in ["alto", "bajo"]:
+        with st.expander(f"Mezcla {t}"):
+            for tipo in ["A", "B"]:
+                mezclas[t][tipo] = st.number_input(f"{t} - {tipo}", value=mezclas[t][tipo], key=f"mezcla_{t}_{tipo}")
+    st.session_state["mezclas"] = mezclas
 
-# Add some spacing
-''
-''
+# Formulario para editar países
+def paises_form():
+    st.subheader("Países destino")
+    paises = st.session_state["paises"]
+    to_delete = []
+    for nombre, datos in paises.items():
+        with st.expander(f"{nombre}"):
+            new_nombre = st.text_input(f"Nombre país", value=nombre, key=f"paisname_{nombre}")
+            alto = st.number_input(f"Demanda alto", value=datos["alto"], key=f"paisalto_{nombre}")
+            bajo = st.number_input(f"Demanda bajo", value=datos["bajo"], key=f"paisbajo_{nombre}")
+            envio = {}
+            for planta in st.session_state["plantas"]:
+                envio[planta] = {}
+                for t in ["alto", "bajo"]:
+                    envio[planta][t] = st.number_input(f"Envío {planta} {t}", value=datos["envio"].get(planta, {}).get(t, 0), key=f"paisenvio_{nombre}_{planta}_{t}")
+            if st.button(f"Eliminar país {nombre}"):
+                to_delete.append(nombre)
+            paises[new_nombre] = {"alto": alto, "bajo": bajo, "envio": envio}
+            if new_nombre != nombre:
+                to_delete.append(nombre)
+    for nombre in to_delete:
+        if nombre in paises:
+            del paises[nombre]
+    if st.button("Agregar país"):
+        paises[f"País{len(paises)+1}"] = {"alto": 0, "bajo": 0, "envio": {pl: {"alto": 0, "bajo": 0} for pl in st.session_state["plantas"]}}
+    st.session_state["paises"] = paises
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# Mostrar formularios
+# Quitar el expander externo para evitar anidación
+minas_form()
+plantas_form()
+mezclas_form()
+paises_form()
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# Usar los datos editados
+minas = st.session_state["minas"]
+plantas = st.session_state["plantas"]
+mezclas = st.session_state["mezclas"]
+paises = st.session_state["paises"]
 
-countries = gdp_df['Country Code'].unique()
+# =======================
+# SUMAR/RESTAR VARIABLES ANTES DE RESOLVER
+# =======================
 
-if not len(countries):
-    st.warning("Select at least one country")
+st.sidebar.header("➕➖ Sumar/Restar variables")
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+# Minas
+if st.sidebar.button("+ Agregar mina"):
+    minas[f"Mina{len(minas)+1}"] = {"tipo": "A", "compra": 0, "envio": {pl: 0 for pl in plantas}, "limite": 0}
+if st.sidebar.button("- Quitar mina") and len(minas) > 1:
+    minas.pop(list(minas.keys())[-1])
 
-''
-''
-''
+# Plantas
+if st.sidebar.button("+ Agregar planta"):
+    plantas[f"Planta{len(plantas)+1}"] = {"capacidad": 0, "proceso": {"alto": 0, "bajo": 0}}
+if st.sidebar.button("- Quitar planta") and len(plantas) > 1:
+    plantas.pop(list(plantas.keys())[-1])
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+# Países
+if st.sidebar.button("+ Agregar país"):
+    paises[f"País{len(paises)+1}"] = {"alto": 0, "bajo": 0, "envio": {pl: {"alto": 0, "bajo": 0} for pl in plantas}}
+if st.sidebar.button("- Quitar país") and len(paises) > 1:
+    paises.pop(list(paises.keys())[-1])
 
-st.header('GDP over time', divider='gray')
+# Mezclas (solo sumar/restar tipos si lo deseas, pero normalmente son fijos)
 
-''
+st.session_state["minas"] = minas
+st.session_state["plantas"] = plantas
+st.session_state["paises"] = paises
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
+# =======================
+# RESOLUCIÓN Y TABLAS BONITAS
+# =======================
 
-''
-''
+if st.button("🔍 Resolver modelo"):
+    with st.spinner("Calculando solución óptima..."):
+        modelo = pulp.LpProblem("American_Steel_Optimization", pulp.LpMinimize)
 
+        # VARIABLES
+        envio_mineral = pulp.LpVariable.dicts("envioMineral",
+            [(m, p) for m in minas for p in plantas], lowBound=0)
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+        produccion = pulp.LpVariable.dicts("produccion",
+            [(p, t) for p in plantas for t in ["alto", "bajo"]], lowBound=0)
 
-st.header(f'GDP in {to_year}', divider='gray')
+        distribucion = pulp.LpVariable.dicts("distribucion",
+            [(p, c, t) for p in plantas for c in paises for t in ["alto", "bajo"]], lowBound=0)
 
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+        # OBJETIVO: compra + envío mineral + procesamiento + distribución
+        modelo += (
+            pulp.lpSum(
+                envio_mineral[m, p] * (minas[m]["compra"] + minas[m]["envio"][p])
+                for m in minas for p in plantas
+            ) +
+            pulp.lpSum(
+                produccion[p, t] * plantas[p]["proceso"][t]
+                for p in plantas for t in ["alto", "bajo"]
+            ) +
+            pulp.lpSum(
+                distribucion[p, c, t] * paises[c]["envio"][p][t]
+                for p in plantas for c in paises for t in ["alto", "bajo"]
+            )
         )
+
+        # RESTRICCIONES
+        for m in minas:
+            modelo += pulp.lpSum(envio_mineral[m, p] for p in plantas) <= minas[m]["limite"]
+        for p in plantas:
+            modelo += pulp.lpSum(envio_mineral[m, p] for m in minas) <= plantas[p]["capacidad"]
+        for p in plantas:
+            for t in ["alto", "bajo"]:
+                req_A = mezclas[t]["A"]
+                req_B = mezclas[t]["B"]
+                total_req = req_A + req_B
+                A_disponible = pulp.lpSum(envio_mineral[m, p] for m in minas if minas[m]["tipo"] == "A")
+                B_disponible = pulp.lpSum(envio_mineral[m, p] for m in minas if minas[m]["tipo"] == "B")
+                modelo += A_disponible >= produccion[p, t] * (req_A / total_req)
+                modelo += B_disponible >= produccion[p, t] * (req_B / total_req)
+        for p in plantas:
+            for t in ["alto", "bajo"]:
+                modelo += pulp.lpSum(distribucion[p, c, t] for c in paises) <= produccion[p, t]
+        for c in paises:
+            for t in ["alto", "bajo"]:
+                modelo += pulp.lpSum(distribucion[p, c, t] for p in plantas) == paises[c][t]
+
+        modelo.solve()
+
+        if pulp.LpStatus[modelo.status] == "Optimal":
+            st.success(f"Solución óptima encontrada. Costo total: ${pulp.value(modelo.objective):,.2f}")
+            # TABLAS BONITAS
+            st.subheader("📦 Distribución de Acero (tabla)")
+            rows = []
+            for p in plantas:
+                for c in paises:
+                    for t in ["alto", "bajo"]:
+                        val = distribucion[p, c, t].varValue
+                        if val > 0:
+                            rows.append({"Planta": p, "País": c, "Tipo": t, "Toneladas": val})
+            if rows:
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No hay distribución positiva.")
+
+            st.subheader("🚚 Envío de mineral (tabla)")
+            rows = []
+            for m in minas:
+                for p in plantas:
+                    val = envio_mineral[m, p].varValue
+                    if val > 0:
+                        rows.append({"Mina": m, "Planta": p, "Toneladas": val})
+            if rows:
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No hay envío de mineral positivo.")
+
+            st.subheader("🏭 Producción por planta (tabla)")
+            rows = []
+            for p in plantas:
+                for t in ["alto", "bajo"]:
+                    val = produccion[p, t].varValue
+                    if val > 0:
+                        rows.append({"Planta": p, "Tipo": t, "Toneladas": val})
+            if rows:
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No hay producción positiva.")
+        else:
+            st.error("⚠️ No se encontró una solución óptima.")
