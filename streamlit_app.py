@@ -2,8 +2,8 @@ import streamlit as st
 import pulp
 import pandas as pd
 
-st.set_page_config(page_title="American Steel Optimizer", layout="centered")
-st.title("🧮 American Steel Company - Optimización de Costos")
+st.set_page_config(page_title="American Steel company", layout="centered")
+st.title("American Steel Company - analisis de sensibilidad")
 
 # =======================
 # DATOS POR DEFECTO
@@ -177,7 +177,7 @@ st.sidebar.header("➕➖ Sumar/Restar variables")
 
 # Minas
 if st.sidebar.button("+ Agregar mina"):
-    minas[f"Mina{len(minas)+1}"] = {"tipo": "A", "compra": 0, "envio": {pl: 0 for pl in plantas}, "limite": 0}
+    minas[f"Mina{len(minas)+1}"] = {"tipo": "A", "compra": 0, "envio": {0 for pl in plantas}, "limite": 0}
 if st.sidebar.button("- Quitar mina") and len(minas) > 1:
     minas.pop(list(minas.keys())[-1])
 
@@ -203,100 +203,154 @@ st.session_state["paises"] = paises
 # RESOLUCIÓN Y TABLAS BONITAS
 # =======================
 
+# =======================
+# SELECCIÓN DE OBJETIVO
+# =======================
+
+objetivo = st.radio(
+    "¿Qué desea hacer?",
+    ("Minimizar costo total", "Maximizar producción total"),
+    index=0
+)
+
 if st.button("🔍 Resolver modelo"):
     with st.spinner("Calculando solución óptima..."):
-        modelo = pulp.LpProblem("American_Steel_Optimization", pulp.LpMinimize)
+        modelo = pulp.LpProblem("Modelo_American_Steel", pulp.LpMinimize if objetivo == "Minimizar costo total" else pulp.LpMaximize)
 
-        # VARIABLES
-        envio_mineral = pulp.LpVariable.dicts("envioMineral",
-            [(m, p) for m in minas for p in plantas], lowBound=0)
+        # VARIABLES CORRECTAS
+        envio_mineral = pulp.LpVariable.dicts("envioMineral", [(m, p) for m in minas for p in plantas], lowBound=0)
+        procesado = pulp.LpVariable.dicts("procesado", [(p, t) for p in plantas for t in ["alto", "bajo"]], lowBound=0)
+        distribucion = pulp.LpVariable.dicts("distribucion", [(p, c, t) for p in plantas for c in paises for t in ["alto", "bajo"]], lowBound=0)
+        uso_mineral = pulp.LpVariable.dicts("usoMineral", [(m, p, t) for m in minas for p in plantas for t in ["alto", "bajo"]], lowBound=0)
 
-        produccion = pulp.LpVariable.dicts("produccion",
-            [(p, t) for p in plantas for t in ["alto", "bajo"]], lowBound=0)
-
-        distribucion = pulp.LpVariable.dicts("distribucion",
-            [(p, c, t) for p in plantas for c in paises for t in ["alto", "bajo"]], lowBound=0)
-
-        # OBJETIVO: compra + envío mineral + procesamiento + distribución
-        modelo += (
-            pulp.lpSum(
-                envio_mineral[m, p] * (minas[m]["compra"] + minas[m]["envio"][p])
-                for m in minas for p in plantas
-            ) +
-            pulp.lpSum(
-                produccion[p, t] * plantas[p]["proceso"][t]
-                for p in plantas for t in ["alto", "bajo"]
-            ) +
-            pulp.lpSum(
-                distribucion[p, c, t] * paises[c]["envio"][p][t]
-                for p in plantas for c in paises for t in ["alto", "bajo"]
+        # OBJETIVO CORRECTO
+        if objetivo == "Minimizar costo total":
+            modelo += (
+                pulp.lpSum(envio_mineral[m, p] * (minas[m]["compra"] + minas[m]["envio"][p]) for m in minas for p in plantas) +
+                pulp.lpSum(procesado[p, t] * plantas[p]["proceso"][t] for p in plantas for t in ["alto", "bajo"]) +
+                pulp.lpSum(distribucion[p, c, t] * paises[c]["envio"][p][t] for p in plantas for c in paises for t in ["alto", "bajo"])
             )
-        )
+        else:
+            modelo += pulp.lpSum(procesado[p, t] for p in plantas for t in ["alto", "bajo"])
 
         # RESTRICCIONES
         for m in minas:
             modelo += pulp.lpSum(envio_mineral[m, p] for p in plantas) <= minas[m]["limite"]
         for p in plantas:
             modelo += pulp.lpSum(envio_mineral[m, p] for m in minas) <= plantas[p]["capacidad"]
+        # Relación entre uso de mineral y procesado (mezcla)
         for p in plantas:
             for t in ["alto", "bajo"]:
-                req_A = mezclas[t]["A"]
-                req_B = mezclas[t]["B"]
-                total_req = req_A + req_B
-                A_disponible = pulp.lpSum(envio_mineral[m, p] for m in minas if minas[m]["tipo"] == "A")
-                B_disponible = pulp.lpSum(envio_mineral[m, p] for m in minas if minas[m]["tipo"] == "B")
-                modelo += A_disponible >= produccion[p, t] * (req_A / total_req)
-                modelo += B_disponible >= produccion[p, t] * (req_B / total_req)
+                suma_mezcla = mezclas[t]["A"] + mezclas[t]["B"]
+                for m in minas:
+                    tipo = minas[m]["tipo"]
+                    modelo += uso_mineral[m, p, t] == procesado[p, t] * (mezclas[t][tipo] / suma_mezcla)
+        # Balance de mineral enviado y usado en cada planta
+        for m in minas:
+            for p in plantas:
+                modelo += envio_mineral[m, p] == pulp.lpSum(uso_mineral[m, p, t] for t in ["alto", "bajo"])
+        # Balance de planta: lo que entra = lo que se procesa
+        for p in plantas:
+            modelo += pulp.lpSum(envio_mineral[m, p] for m in minas) == pulp.lpSum(procesado[p, t] for t in ["alto", "bajo"])
         for p in plantas:
             for t in ["alto", "bajo"]:
-                modelo += pulp.lpSum(distribucion[p, c, t] for c in paises) <= produccion[p, t]
+                modelo += pulp.lpSum(distribucion[p, c, t] for c in paises) <= procesado[p, t]
         for c in paises:
             for t in ["alto", "bajo"]:
                 modelo += pulp.lpSum(distribucion[p, c, t] for p in plantas) == paises[c][t]
 
+        # RESTRICCIONES ESPECÍFICAS DEL USUARIO
+        for restr in st.session_state["restricciones_especificas"]:
+            m = restr["mina"]
+            p = restr["planta"]
+            expr = envio_mineral[m, p]
+            if restr["oper"] == "<=" :
+                modelo += expr <= restr["valor"]
+            elif restr["oper"] == ">=":
+                modelo += expr >= restr["valor"]
+            else:
+                modelo += expr == restr["valor"]
+
         modelo.solve()
 
         if pulp.LpStatus[modelo.status] == "Optimal":
-            st.success(f"Solución óptima encontrada. Costo total: ${pulp.value(modelo.objective):,.2f}")
-            # TABLAS BONITAS
-            st.subheader("📦 Distribución de Acero (tabla)")
-            rows = []
-            for p in plantas:
-                for c in paises:
-                    for t in ["alto", "bajo"]:
-                        val = distribucion[p, c, t].varValue
-                        if val > 0:
-                            rows.append({"Planta": p, "País": c, "Tipo": t, "Toneladas": val})
-            if rows:
-                df = pd.DataFrame(rows)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No hay distribución positiva.")
+            st.success(f"✅ Solución óptima encontrada. Costo total: ${pulp.value(modelo.objective):,.2f}")
 
-            st.subheader("🚚 Envío de mineral (tabla)")
-            rows = []
-            for m in minas:
-                for p in plantas:
-                    val = envio_mineral[m, p].varValue
-                    if val > 0:
-                        rows.append({"Mina": m, "Planta": p, "Toneladas": val})
-            if rows:
-                df = pd.DataFrame(rows)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No hay envío de mineral positivo.")
+            # TABLA 1: Envío de mineral de minas a plantas
+            st.subheader("Envío de mineral de minas a plantas")
+            rows_envio = [
+                {"Mina": m, "Planta": p, "Toneladas": envio_mineral[m, p].varValue}
+                for m in minas for p in plantas if envio_mineral[m, p].varValue > 0
+            ]
+            st.dataframe(pd.DataFrame(rows_envio))
 
-            st.subheader("🏭 Producción por planta (tabla)")
-            rows = []
-            for p in plantas:
-                for t in ["alto", "bajo"]:
-                    val = produccion[p, t].varValue
-                    if val > 0:
-                        rows.append({"Planta": p, "Tipo": t, "Toneladas": val})
-            if rows:
-                df = pd.DataFrame(rows)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No hay producción positiva.")
+            # TABLA 2: Producción por planta y tipo
+            st.subheader("Producción por planta y tipo")
+            rows_prod = [
+                {"Planta": p, "Tipo": t, "Toneladas": procesado[p, t].varValue}
+                for p in plantas for t in ["alto", "bajo"] if procesado[p, t].varValue > 0
+            ]
+            st.dataframe(pd.DataFrame(rows_prod))
+
+            # TABLA 3: Distribución de acero a países
+            st.subheader("Distribución de acero a países")
+            rows_dist = [
+                {"Desde": p, "Hacia": c, "Tipo": t, "Toneladas": distribucion[p, c, t].varValue}
+                for p in plantas for c in paises for t in ["alto", "bajo"] if distribucion[p, c, t].varValue > 0
+            ]
+            st.dataframe(pd.DataFrame(rows_dist))
         else:
-            st.error("⚠️ No se encontró una solución óptima.")
+            st.error("No se encontró una solución óptima.")
+
+# =======================
+# PANEL DE RESTRICCIONES MATEMÁTICAS EDITABLES (ESPECÍFICO Y AMIGABLE)
+# =======================
+
+# Estructura: lista de restricciones, cada una es un dict con: {"tipo": str, "mina": str, "planta": str, "oper": str, "valor": float}
+# tipo: "limite_mina", "capacidad_planta", "mezcla", "balance", etc.
+# oper: ">=", "<=", "="
+
+restricciones_default = []
+for m in minas:
+    for p in plantas:
+        restricciones_default.append({
+            "tipo": "limite_mina",
+            "mina": m,
+            "planta": p,
+            "oper": "<=",
+            "valor": minas[m]["limite"]
+        })
+for p in plantas:
+    for m in minas:
+        restricciones_default.append({
+            "tipo": "capacidad_planta",
+            "mina": m,
+            "planta": p,
+            "oper": "<=",
+            "valor": plantas[p]["capacidad"]
+        })
+
+if "restricciones_especificas" not in st.session_state:
+    st.session_state["restricciones_especificas"] = restricciones_default.copy()
+
+with st.expander("✏️ Restricciones matemáticas (afectan el modelo, edición específica)"):
+    st.markdown("Puedes editar, agregar o eliminar restricciones matemáticas. Cada restricción es de la forma: [mina] [operador] [planta] [valor].")
+    for i, restr in enumerate(st.session_state["restricciones_especificas"]):
+        cols = st.columns([2,1,2,1,2,1])
+        with cols[0]:
+            restr["mina"] = st.selectbox(f"Mina", list(minas.keys()), index=list(minas.keys()).index(restr["mina"]), key=f"mina_{i}")
+        with cols[1]:
+            st.write("↔")
+        with cols[2]:
+            restr["planta"] = st.selectbox(f"Planta", list(plantas.keys()), index=list(plantas.keys()).index(restr["planta"]), key=f"planta_{i}")
+        with cols[3]:
+            restr["oper"] = st.selectbox("Operador", ["<=", ">=", "="], index=["<=", ">=", "="].index(restr["oper"]), key=f"oper_{i}")
+        with cols[4]:
+            restr["valor"] = st.number_input("Valor", value=restr["valor"], key=f"valor_{i}")
+        with cols[5]:
+            if st.button("Eliminar", key=f"elim_esp_{i}"):
+                st.session_state["restricciones_especificas"].pop(i)
+                st.rerun()
+    if st.button("Agregar restricción vacía (específica)"):
+        st.session_state["restricciones_especificas"].append({"tipo": "limite_mina", "mina": list(minas.keys())[0], "planta": list(plantas.keys())[0], "oper": "<=", "valor": 0.0})
+        st.rerun()
